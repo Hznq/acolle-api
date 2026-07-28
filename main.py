@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from google import genai
+from google.genai import errors as genai_errors
 import json
 import os
 
@@ -25,21 +26,52 @@ Conversa:
 {conversa}
 """
 
+
 @app.post("/analisar")
 async def analisar_conversa(request: Request):
     dados = await request.json()
-    texto_conversa = dados.get("texto", "")
+    texto_conversa = (dados.get("texto") or "").strip()
+
+    if not texto_conversa:
+        raise HTTPException(
+            status_code=400,
+            detail="Envie um texto não vazio no campo 'texto'.",
+        )
 
     prompt = PROMPT_BASE.format(conversa=texto_conversa)
-    resposta = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt
-    )
+
+    try:
+        resposta = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+    except genai_errors.ClientError as e:
+        # 429 = cota do Gemini estourada (free tier). Repassamos como 429
+        # pro Flutter mostrar uma mensagem amigável em vez de erro genérico.
+        status = getattr(e, "code", None) or 500
+        if status == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Limite de análises de IA atingido no momento. Tente novamente mais tarde.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Erro ao consultar a IA: {e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Erro inesperado ao consultar a IA: {e}",
+        )
+
     texto_resposta = resposta.text.replace("```json", "").replace("```", "").strip()
 
     try:
         analise = json.loads(texto_resposta)
     except json.JSONDecodeError:
-        return {"erro": "A IA não retornou um JSON válido.", "resposta_bruta": texto_resposta}
+        raise HTTPException(
+            status_code=502,
+            detail=f"A IA não retornou um JSON válido. Resposta bruta: {texto_resposta}",
+        )
 
     return analise
